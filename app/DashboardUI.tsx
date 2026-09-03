@@ -65,6 +65,207 @@ function omitNode<T extends { node?: unknown }>(props: T): Omit<T, "node"> {
   return rest as Omit<T, "node">;
 }
 
+// Helper: Turn a repo name into a DOM-safe id for scroll-to-repo anchors.
+function repoElementId(repoName: string) {
+  return `repo-${repoName.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+}
+
+// Helper: Find the open Renovate PR (if any) that carries the real,
+// lockfile-resolved version transition for an inventory item. The
+// "Detected Dependencies" data only reflects the manifest-declared range,
+// which often doesn't change for in-range/lockfile-only updates.
+function findMatchingPR(
+  item: InventoryItem,
+  prs: PullRequestUpdate[],
+): PullRequestUpdate | undefined {
+  return prs.find(
+    (pr) =>
+      pr.repo === item.repo &&
+      parsePRData(pr.title, pr.body).packageName.toLowerCase() ===
+        item.packageName.toLowerCase(),
+  );
+}
+
+// Shared react-markdown renderer, reused by both the PR changelog panel and
+// the dependency detail panel.
+const markdownComponents = {
+  h3: (props: ComponentPropsWithoutRef<"h3"> & ExtraProps) => (
+    <h3
+      className="text-lg font-bold text-slate-800 mt-8 mb-3 pb-2 border-b border-slate-200"
+      {...omitNode(props)}
+    />
+  ),
+  a: (props: ComponentPropsWithoutRef<"a"> & ExtraProps) => {
+    const rest = omitNode(props);
+    if (String(rest.children).includes("Compare Source")) {
+      return (
+        <a
+          {...rest}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 text-xs font-mono font-medium rounded-md transition-colors mt-1 mb-5 shadow-sm"
+        >
+          <svg
+            className="w-3.5 h-3.5 text-slate-400"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"
+            />
+          </svg>
+          Compare Source Diff
+        </a>
+      );
+    }
+    return (
+      <a
+        {...rest}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-indigo-600 hover:text-indigo-800 underline underline-offset-2 font-medium"
+      />
+    );
+  },
+  table: (props: ComponentPropsWithoutRef<"table"> & ExtraProps) => (
+    <div className="overflow-x-auto mb-8 border border-slate-200 rounded-lg shadow-sm">
+      <table
+        className="min-w-full divide-y divide-slate-200 m-0"
+        {...omitNode(props)}
+      />
+    </div>
+  ),
+  thead: (props: ComponentPropsWithoutRef<"thead"> & ExtraProps) => (
+    <thead className="bg-slate-100" {...omitNode(props)} />
+  ),
+  th: (props: ComponentPropsWithoutRef<"th"> & ExtraProps) => (
+    <th
+      className="px-4 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider m-0"
+      {...omitNode(props)}
+    />
+  ),
+  td: (props: ComponentPropsWithoutRef<"td"> & ExtraProps) => (
+    <td
+      className="px-4 py-3 text-sm text-slate-700 border-t border-slate-100 m-0"
+      {...omitNode(props)}
+    />
+  ),
+  ul: (props: ComponentPropsWithoutRef<"ul"> & ExtraProps) => (
+    <ul
+      className="list-disc pl-5 space-y-1.5 mb-6 text-slate-600"
+      {...omitNode(props)}
+    />
+  ),
+  li: (props: ComponentPropsWithoutRef<"li"> & ExtraProps) => (
+    <li className="text-sm leading-relaxed" {...omitNode(props)} />
+  ),
+  p: (props: ComponentPropsWithoutRef<"p"> & ExtraProps) => (
+    <p
+      className="text-sm text-slate-700 mb-4 leading-relaxed"
+      {...omitNode(props)}
+    />
+  ),
+  code: ({
+    inline,
+    ...rest
+  }: ComponentPropsWithoutRef<"code"> & ExtraProps & { inline?: boolean }) =>
+    inline ? (
+      <code
+        className="px-1.5 py-0.5 bg-slate-100 text-pink-600 rounded text-xs font-mono border border-slate-200"
+        {...omitNode(rest)}
+      />
+    ) : (
+      <code {...omitNode(rest)} />
+    ),
+};
+
+// Floating widget to jump straight to a repo's section.
+function RepoJumpNav({ repoNames }: { repoNames: string[] }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [query, setQuery] = useState("");
+
+  if (repoNames.length <= 1) return null;
+
+  const filtered = repoNames.filter((name) =>
+    name.toLowerCase().includes(query.toLowerCase()),
+  );
+
+  const jumpTo = (repoName: string) => {
+    document
+      .getElementById(repoElementId(repoName))
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setIsOpen(false);
+    setQuery("");
+  };
+
+  return (
+    <>
+      {isOpen && (
+        <div className="fixed inset-0 z-40" onClick={() => setIsOpen(false)} />
+      )}
+      <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3">
+        {isOpen && (
+          <div className="w-72 max-w-[calc(100vw-3rem)] max-h-[60vh] flex flex-col bg-white rounded-xl shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="p-3 border-b border-slate-200 shrink-0">
+              <input
+                autoFocus
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Jump to Repo..."
+                className="w-full px-3 py-2 text-sm bg-slate-100 rounded-md border border-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <div className="overflow-y-auto py-1">
+              {filtered.length === 0 ? (
+                <p className="px-4 py-3 text-sm text-slate-400">
+                  No Matching Repos
+                </p>
+              ) : (
+                filtered.map((repoName) => (
+                  <button
+                    key={repoName}
+                    onClick={() => jumpTo(repoName)}
+                    className="w-full text-left px-4 py-2.5 text-sm font-mono text-slate-700 hover:bg-indigo-50 hover:text-indigo-700 transition-colors truncate"
+                  >
+                    {repoName}
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        )}
+        <button
+          onClick={() => setIsOpen((prev) => !prev)}
+          className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white pl-4 pr-5 py-3 rounded-full shadow-lg transition-all"
+        >
+          <svg
+            className="w-5 h-5"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M13 7l5 5m0 0l-5 5m5-5H6"
+            />
+          </svg>
+          <span className="text-sm font-semibold">Jump to Repo</span>
+          <span className="bg-indigo-500 text-xs font-bold px-2 py-0.5 rounded-full">
+            {repoNames.length}
+          </span>
+        </button>
+      </div>
+    </>
+  );
+}
+
 export default function DashboardUI({
   inventory,
   actionablePRs,
@@ -77,23 +278,13 @@ export default function DashboardUI({
   );
   const [selectedUpdate, setSelectedUpdate] =
     useState<PullRequestUpdate | null>(null);
+  const [selectedInventoryItem, setSelectedInventoryItem] =
+    useState<InventoryItem | null>(null);
 
   // Sort and Group Inventory Data
-  const sortedInventory = [...inventory].sort((a, b) => {
-    // 1. Force core frameworks to the absolute top
-    const aIsCore = CORE_FRAMEWORKS.includes(a.packageName.toLowerCase());
-    const bIsCore = CORE_FRAMEWORKS.includes(b.packageName.toLowerCase());
-    if (aIsCore && !bIsCore) return -1;
-    if (!aIsCore && bIsCore) return 1;
-
-    // 2. Then sort by Actionable Updates
-    const aHasUpdate = !!a.targetVersion;
-    const bHasUpdate = !!b.targetVersion;
-    if (aHasUpdate !== bHasUpdate) return aHasUpdate ? -1 : 1;
-
-    // 3. Finally, sort alphabetically
-    return a.packageName.localeCompare(b.packageName);
-  });
+  const sortedInventory = [...inventory].sort((a, b) =>
+    a.packageName.localeCompare(b.packageName),
+  );
 
   const groupedInventory = sortedInventory.reduce(
     (acc, item) => {
@@ -157,6 +348,56 @@ export default function DashboardUI({
           </div>
         </header>
 
+        {/* --- DATA SOURCE DESCRIPTION --- */}
+        <div className="mb-6 flex items-start gap-3 bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 text-sm text-blue-900">
+          <svg
+            className="w-5 h-5 shrink-0 mt-0.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            viewBox="0 0 24 24"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="16" x2="12" y2="12" />
+            <line x1="12" y1="8" x2="12.01" y2="8" />
+          </svg>
+          {activeTab === "updates" ? (
+            <p key="updates-desc">
+              <strong>Source:</strong>{" "}
+              <span>
+                Open pull requests created by Renovate for each repository.
+                Each row shows the real, lockfile-resolved version change
+                (e.g.{" "}
+                <code className="font-mono bg-white/60 px-1 rounded">
+                  1.11.21 → 1.11.23
+                </code>
+                ) taken directly from the PR — this is the version that
+                actually gets installed once merged.
+              </span>
+            </p>
+          ) : (
+            <p key="inventory-desc">
+              <strong>Source:</strong>{" "}
+              <span>
+                The version range declared in each repo&apos;s manifest (e.g.{" "}
+                <code className="font-mono bg-white/60 px-1 rounded">
+                  package.json
+                </code>
+                ), read from Renovate&apos;s &quot;Detected Dependencies&quot;
+                list. A range like{" "}
+                <code className="font-mono bg-white/60 px-1 rounded">
+                  ^1.11.11
+                </code>{" "}
+                can already cover a newer release without needing to change —
+                click a row to see the real pending version if an update PR
+                exists.
+              </span>
+            </p>
+          )}
+        </div>
+
         {/* --- VIEW 1: ACTIONABLE UPDATES (PRs) --- */}
         {activeTab === "updates" &&
           (Object.keys(groupedPRs).length === 0 ? (
@@ -166,121 +407,169 @@ export default function DashboardUI({
             </div>
           ) : (
             <div className="space-y-8 animate-fade-in">
-              {Object.entries(groupedPRs).map(([repoName, repoUpdates]) => (
-                <div
-                  key={`pr-${repoName}`}
-                  className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden"
-                >
-                  <div className="bg-slate-800 px-6 py-4 border-b border-slate-200 flex justify-between items-center">
-                    <h2 className="text-lg font-semibold text-white tracking-wide">
-                      📦 {repoName}
-                    </h2>
-                  </div>
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-slate-200">
-                      <thead className="bg-slate-50">
-                        <tr>
-                          <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">
-                            Package
-                          </th>
-                          <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">
-                            Version Change
-                          </th>
-                          <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">
-                            Metrics
-                          </th>
-                          <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/12">
-                            State
-                          </th>
-                          <th className="px-6 py-3 text-right text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/6">
-                            Action
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100">
-                        {repoUpdates.map((update) => {
-                          const prData = parsePRData(update.title, update.body);
-                          return (
-                            <tr
-                              key={update.id}
-                              onClick={() => setSelectedUpdate(update)}
-                              className="hover:bg-indigo-50 transition-colors cursor-pointer group"
-                            >
-                              <td className="px-6 py-4">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-sm font-medium text-slate-800 font-mono">
-                                    {prData.packageName}
-                                  </span>
-                                  {prData.isBatched && (
-                                    <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-slate-200 text-slate-700 rounded border border-slate-300">
-                                      Batched
-                                    </span>
-                                  )}
-                                </div>
-                              </td>
-                              <td className="px-6 py-4 whitespace-nowrap">
-                                {prData.currentVersion && prData.newVersion ? (
-                                  <div className="flex items-center gap-2 text-sm font-mono">
-                                    <span className="bg-slate-100 text-slate-700 px-2.5 py-1 rounded-md border border-slate-300">
-                                      {prData.currentVersion}
-                                    </span>
-                                    <span className="text-slate-400">→</span>
-                                    <span className="bg-blue-50 text-blue-700 font-bold px-2.5 py-1 rounded-md border border-blue-200">
-                                      {prData.newVersion}
-                                    </span>
-                                  </div>
-                                ) : (
-                                  <span className="text-sm text-slate-400 italic">
-                                    See Changelog Details
-                                  </span>
-                                )}
-                              </td>
-                              <td className="px-6 py-4 whitespace-nowrap">
-                                <div className="flex flex-col gap-2">
-                                  {prData.ageBadge && (
-                                    // eslint-disable-next-line @next/next/no-img-element -- variable-width remote SVG badge; real intrinsic width is unknown ahead of render, so next/image's required static width/height would either misrepresent it or force a fixed box, defeating the auto width
-                                    <img
-                                      src={prData.ageBadge}
-                                      alt="Age Metric"
-                                      className="h-5 w-auto object-contain object-left"
-                                    />
-                                  )}
-                                  {prData.confidenceBadge && (
-                                    // eslint-disable-next-line @next/next/no-img-element -- variable-width remote SVG badge; real intrinsic width is unknown ahead of render, so next/image's required static width/height would either misrepresent it or force a fixed box, defeating the auto width
-                                    <img
-                                      src={prData.confidenceBadge}
-                                      alt="Confidence Metric"
-                                      className="h-5 w-auto object-contain object-left"
-                                    />
-                                  )}
-                                  {!prData.ageBadge &&
-                                    !prData.confidenceBadge && (
-                                      <span className="text-xs text-slate-400">
-                                        No Metrics Available
+              {Object.entries(groupedPRs)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([repoName, repoUpdates]) => (
+                  <div
+                    key={`pr-${repoName}`}
+                    id={repoElementId(repoName)}
+                    className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden scroll-mt-6"
+                  >
+                    <div className="bg-slate-800 px-6 py-4 border-b border-slate-200 flex justify-between items-center">
+                      <h2 className="text-lg font-semibold text-white tracking-wide">
+                        📦 {repoName}
+                      </h2>
+                      <a
+                        href={`https://github.com/PT-Helios-Informatika-Nusantara/${repoName}/issues?q=is%3Aissue+is%3Aopen+Dependency+Dashboard`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs font-mono font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 border border-slate-600 px-3 py-1.5 rounded-md transition-all flex items-center gap-2 shadow-sm"
+                      >
+                        <span>Manage on GitHub</span>
+                        <svg
+                          className="w-3.5 h-3.5"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                          xmlns="http://www.w3.org/2000/svg"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
+                          />
+                        </svg>
+                      </a>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full divide-y divide-slate-200">
+                        <thead className="bg-slate-50">
+                          <tr>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">
+                              Package
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">
+                              Version Change
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">
+                              Metrics
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/12">
+                              State
+                            </th>
+                            <th className="px-6 py-3 text-right text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/6">
+                              Action
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {[...repoUpdates]
+                            .sort((a, b) =>
+                              parsePRData(
+                                a.title,
+                                a.body,
+                              ).packageName.localeCompare(
+                                parsePRData(b.title, b.body).packageName,
+                              ),
+                            )
+                            .map((update) => {
+                              const prData = parsePRData(
+                                update.title,
+                                update.body,
+                              );
+                              const isCore = CORE_FRAMEWORKS.includes(
+                                prData.packageName.toLowerCase(),
+                              );
+                              return (
+                                <tr
+                                  key={update.id}
+                                  onClick={() => setSelectedUpdate(update)}
+                                  className="hover:bg-indigo-50 transition-colors cursor-pointer group"
+                                >
+                                  <td className="px-6 py-4">
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-sm font-medium text-slate-800 font-mono">
+                                        {prData.packageName}
+                                      </span>
+                                      {isCore && (
+                                        <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider font-mono bg-indigo-100 text-indigo-700 border border-indigo-200 rounded">
+                                          Core
+                                        </span>
+                                      )}
+                                      {prData.isBatched && (
+                                        <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-slate-200 text-slate-700 rounded border border-slate-300">
+                                          Batched
+                                        </span>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td className="px-6 py-4 whitespace-nowrap">
+                                    {prData.currentVersion &&
+                                    prData.newVersion ? (
+                                      <div className="flex items-center gap-2 text-sm font-mono">
+                                        <span className="bg-slate-100 text-slate-700 px-2.5 py-1 rounded-md border border-slate-300">
+                                          {prData.currentVersion}
+                                        </span>
+                                        <span className="text-slate-400">
+                                          →
+                                        </span>
+                                        <span className="bg-blue-50 text-blue-700 font-bold px-2.5 py-1 rounded-md border border-blue-200">
+                                          {prData.newVersion}
+                                        </span>
+                                      </div>
+                                    ) : (
+                                      <span className="text-sm text-slate-400 italic">
+                                        See Changelog Details
                                       </span>
                                     )}
-                                </div>
-                              </td>
-                              <td className="px-6 py-4 whitespace-nowrap">
-                                <span
-                                  className={`px-2.5 py-1 inline-flex text-[10px] font-bold uppercase tracking-wide rounded-full ${update.isDraft ? "bg-slate-200 text-slate-700" : "bg-blue-100 text-blue-700"}`}
-                                >
-                                  {update.isDraft ? "Draft" : "Open"}
-                                </span>
-                              </td>
-                              <td className="px-6 py-4 whitespace-nowrap text-right">
-                                <span className="text-sm text-indigo-600 font-medium group-hover:underline">
-                                  Review &rarr;
-                                </span>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                                  </td>
+                                  <td className="px-6 py-4 whitespace-nowrap">
+                                    <div className="flex flex-col gap-2">
+                                      {prData.ageBadge && (
+                                        // eslint-disable-next-line @next/next/no-img-element -- variable-width remote SVG badge; real intrinsic width is unknown ahead of render, so next/image's required static width/height would either misrepresent it or force a fixed box, defeating the auto width
+                                        <img
+                                          src={prData.ageBadge}
+                                          alt="Age Metric"
+                                          className="h-5 w-auto object-contain object-left"
+                                        />
+                                      )}
+                                      {prData.confidenceBadge && (
+                                        // eslint-disable-next-line @next/next/no-img-element -- variable-width remote SVG badge; real intrinsic width is unknown ahead of render, so next/image's required static width/height would either misrepresent it or force a fixed box, defeating the auto width
+                                        <img
+                                          src={prData.confidenceBadge}
+                                          alt="Confidence Metric"
+                                          className="h-5 w-auto object-contain object-left"
+                                        />
+                                      )}
+                                      {!prData.ageBadge &&
+                                        !prData.confidenceBadge && (
+                                          <span className="text-xs text-slate-400">
+                                            No Metrics Available
+                                          </span>
+                                        )}
+                                    </div>
+                                  </td>
+                                  <td className="px-6 py-4 whitespace-nowrap">
+                                    <span
+                                      className={`px-2.5 py-1 inline-flex text-[10px] font-bold uppercase tracking-wide rounded-full ${update.isDraft ? "bg-slate-200 text-slate-700" : "bg-blue-100 text-blue-700"}`}
+                                    >
+                                      {update.isDraft ? "Draft" : "Open"}
+                                    </span>
+                                  </td>
+                                  <td className="px-6 py-4 whitespace-nowrap text-right">
+                                    <span className="text-sm text-indigo-600 font-medium group-hover:underline">
+                                      Review &rarr;
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
             </div>
           ))}
 
@@ -293,120 +582,130 @@ export default function DashboardUI({
             </div>
           ) : (
             <div className="space-y-8 animate-fade-in">
-              {Object.entries(groupedInventory).map(([repoName, repoItems]) => (
-                <div
-                  key={`inv-${repoName}`}
-                  className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden"
-                >
-                  <div className="bg-slate-800 px-6 py-4 border-b border-slate-200 flex justify-between items-center">
-                    <h2 className="text-lg font-semibold text-white tracking-wide">
-                      📦 {repoName}
-                    </h2>
-                    <a
-                      href={`https://github.com/PT-Helios-Informatika-Nusantara/${repoName}/issues?q=is%3Aissue+is%3Aopen+Dependency+Dashboard`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs font-mono font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 border border-slate-600 px-3 py-1.5 rounded-md transition-all flex items-center gap-2 shadow-sm"
-                    >
-                      <span>Manage on GitHub</span>
-                      <svg
-                        className="w-3.5 h-3.5"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                        xmlns="http://www.w3.org/2000/svg"
+              {Object.entries(groupedInventory)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([repoName, repoItems]) => (
+                  <div
+                    key={`inv-${repoName}`}
+                    id={repoElementId(repoName)}
+                    className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden scroll-mt-6"
+                  >
+                    <div className="bg-slate-800 px-6 py-4 border-b border-slate-200 flex justify-between items-center">
+                      <h2 className="text-lg font-semibold text-white tracking-wide">
+                        📦 {repoName}
+                      </h2>
+                      <a
+                        href={`https://github.com/PT-Helios-Informatika-Nusantara/${repoName}/issues?q=is%3Aissue+is%3Aopen+Dependency+Dashboard`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs font-mono font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 border border-slate-600 px-3 py-1.5 rounded-md transition-all flex items-center gap-2 shadow-sm"
                       >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
-                        />
-                      </svg>
-                    </a>
-                  </div>
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-slate-200">
-                      <thead className="bg-slate-50">
-                        <tr>
-                          <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">
-                            Package
-                          </th>
-                          <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">
-                            Current Version
-                          </th>
-                          <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">
-                            New Version
-                          </th>
-                          <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">
-                            Status
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 bg-white">
-                        {repoItems.map((item) => {
-                          const isCore = CORE_FRAMEWORKS.includes(
-                            item.packageName.toLowerCase(),
-                          );
-                          const hasUpdate = !!item.targetVersion;
+                        <span>Manage on GitHub</span>
+                        <svg
+                          className="w-3.5 h-3.5"
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                          xmlns="http://www.w3.org/2000/svg"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
+                          />
+                        </svg>
+                      </a>
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full divide-y divide-slate-200">
+                        <thead className="bg-slate-50">
+                          <tr>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">
+                              Package
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">
+                              Current Version
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">
+                              New Version
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-semibold text-slate-500 uppercase tracking-wider w-1/4">
+                              Status
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 bg-white">
+                          {repoItems.map((item) => {
+                            const isCore = CORE_FRAMEWORKS.includes(
+                              item.packageName.toLowerCase(),
+                            );
+                            const hasUpdate = !!item.targetVersion;
 
-                          return (
-                            <tr
-                              key={item.id}
-                              className="hover:bg-slate-50 transition-colors"
-                            >
-                              <td className="px-6 py-4 whitespace-nowrap">
-                                <div className="flex items-center gap-3">
-                                  <span className="text-sm font-medium text-slate-800 font-mono">
-                                    {item.packageName}
-                                  </span>
-                                  {isCore && (
-                                    <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider font-mono bg-indigo-100 text-indigo-700 border border-indigo-200 rounded">
-                                      Core
+                            return (
+                              <tr
+                                key={item.id}
+                                onClick={() => setSelectedInventoryItem(item)}
+                                className="hover:bg-slate-50 transition-colors cursor-pointer"
+                              >
+                                <td className="px-6 py-4 whitespace-nowrap">
+                                  <div className="flex items-center gap-3">
+                                    <span className="text-sm font-medium text-slate-800 font-mono">
+                                      {item.packageName}
+                                    </span>
+                                    {isCore && (
+                                      <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider font-mono bg-indigo-100 text-indigo-700 border border-indigo-200 rounded">
+                                        Core
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                  <div className="font-mono text-slate-800 font-medium bg-slate-100 inline-block px-2.5 py-1 rounded-md border border-slate-300">
+                                    {item.currentVersion}
+                                  </div>
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap text-sm">
+                                  {hasUpdate ? (
+                                    <div className="inline-block bg-blue-50 text-blue-700 font-bold font-mono px-2.5 py-1 rounded-md border border-blue-200">
+                                      {item.targetVersion}
+                                    </div>
+                                  ) : (
+                                    <span className="text-slate-300 font-bold pl-4">
+                                      --
                                     </span>
                                   )}
-                                </div>
-                              </td>
-                              <td className="px-6 py-4 whitespace-nowrap text-sm">
-                                <div className="font-mono text-slate-800 font-medium bg-slate-100 inline-block px-2.5 py-1 rounded-md border border-slate-300">
-                                  {item.currentVersion}
-                                </div>
-                              </td>
-                              <td className="px-6 py-4 whitespace-nowrap text-sm">
-                                {hasUpdate ? (
-                                  <div className="inline-block bg-blue-50 text-blue-700 font-bold font-mono px-2.5 py-1 rounded-md border border-blue-200">
-                                    {item.targetVersion}
-                                  </div>
-                                ) : (
-                                  <span className="text-slate-300 font-bold pl-4">
-                                    --
+                                </td>
+                                <td className="px-6 py-4 whitespace-nowrap">
+                                  <span
+                                    className={`px-3 py-1 inline-flex text-xs font-bold uppercase tracking-wide rounded-full ${
+                                      hasUpdate
+                                        ? "bg-amber-100 text-amber-800 border border-amber-200"
+                                        : "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                                    }`}
+                                  >
+                                    {hasUpdate
+                                      ? "Update Available"
+                                      : "Up to date"}
                                   </span>
-                                )}
-                              </td>
-                              <td className="px-6 py-4 whitespace-nowrap">
-                                <span
-                                  className={`px-3 py-1 inline-flex text-xs font-bold uppercase tracking-wide rounded-full ${
-                                    hasUpdate
-                                      ? "bg-amber-100 text-amber-800 border border-amber-200"
-                                      : "bg-emerald-100 text-emerald-800 border border-emerald-200"
-                                  }`}
-                                >
-                                  {hasUpdate
-                                    ? "Update Available"
-                                    : "Up to date"}
-                                </span>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
             </div>
           ))}
       </div>
+
+      <RepoJumpNav
+        repoNames={Object.keys(
+          activeTab === "updates" ? groupedPRs : groupedInventory,
+        ).sort((a, b) => a.localeCompare(b))}
+      />
 
       {/* --- THE SLIDE-OVER PANEL (Only Renders for Updates) --- */}
       {selectedUpdate && (
@@ -445,118 +744,7 @@ export default function DashboardUI({
               <div className="max-w-none">
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
-                  components={{
-                    h3: (
-                      props: ComponentPropsWithoutRef<"h3"> & ExtraProps,
-                    ) => (
-                      <h3
-                        className="text-lg font-bold text-slate-800 mt-8 mb-3 pb-2 border-b border-slate-200"
-                        {...omitNode(props)}
-                      />
-                    ),
-                    a: (props: ComponentPropsWithoutRef<"a"> & ExtraProps) => {
-                      const rest = omitNode(props);
-                      if (String(rest.children).includes("Compare Source")) {
-                        return (
-                          <a
-                            {...rest}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 text-xs font-mono font-medium rounded-md transition-colors mt-1 mb-5 shadow-sm"
-                          >
-                            <svg
-                              className="w-3.5 h-3.5 text-slate-400"
-                              fill="none"
-                              stroke="currentColor"
-                              viewBox="0 0 24 24"
-                            >
-                              <path
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                strokeWidth={2}
-                                d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"
-                              />
-                            </svg>
-                            Compare Source Diff
-                          </a>
-                        );
-                      }
-                      return (
-                        <a
-                          {...rest}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-indigo-600 hover:text-indigo-800 underline underline-offset-2 font-medium"
-                        />
-                      );
-                    },
-                    table: (
-                      props: ComponentPropsWithoutRef<"table"> & ExtraProps,
-                    ) => (
-                      <div className="overflow-x-auto mb-8 border border-slate-200 rounded-lg shadow-sm">
-                        <table
-                          className="min-w-full divide-y divide-slate-200 m-0"
-                          {...omitNode(props)}
-                        />
-                      </div>
-                    ),
-                    thead: (
-                      props: ComponentPropsWithoutRef<"thead"> & ExtraProps,
-                    ) => (
-                      <thead className="bg-slate-100" {...omitNode(props)} />
-                    ),
-                    th: (
-                      props: ComponentPropsWithoutRef<"th"> & ExtraProps,
-                    ) => (
-                      <th
-                        className="px-4 py-3 text-left text-xs font-semibold text-slate-600 uppercase tracking-wider m-0"
-                        {...omitNode(props)}
-                      />
-                    ),
-                    td: (
-                      props: ComponentPropsWithoutRef<"td"> & ExtraProps,
-                    ) => (
-                      <td
-                        className="px-4 py-3 text-sm text-slate-700 border-t border-slate-100 m-0"
-                        {...omitNode(props)}
-                      />
-                    ),
-                    ul: (
-                      props: ComponentPropsWithoutRef<"ul"> & ExtraProps,
-                    ) => (
-                      <ul
-                        className="list-disc pl-5 space-y-1.5 mb-6 text-slate-600"
-                        {...omitNode(props)}
-                      />
-                    ),
-                    li: (
-                      props: ComponentPropsWithoutRef<"li"> & ExtraProps,
-                    ) => (
-                      <li
-                        className="text-sm leading-relaxed"
-                        {...omitNode(props)}
-                      />
-                    ),
-                    p: (props: ComponentPropsWithoutRef<"p"> & ExtraProps) => (
-                      <p
-                        className="text-sm text-slate-700 mb-4 leading-relaxed"
-                        {...omitNode(props)}
-                      />
-                    ),
-                    code: ({
-                      inline,
-                      ...rest
-                    }: ComponentPropsWithoutRef<"code"> &
-                      ExtraProps & { inline?: boolean }) =>
-                      inline ? (
-                        <code
-                          className="px-1.5 py-0.5 bg-slate-100 text-pink-600 rounded text-xs font-mono border border-slate-200"
-                          {...omitNode(rest)}
-                        />
-                      ) : (
-                        <code {...omitNode(rest)} />
-                      ),
-                  }}
+                  components={markdownComponents}
                 >
                   {cleanMarkdownBody(selectedUpdate.body)}
                 </ReactMarkdown>
@@ -589,6 +777,182 @@ export default function DashboardUI({
           </div>
         </div>
       )}
+
+      {/* --- DEPENDENCY DETAIL PANEL (Inventory tab) --- */}
+      {selectedInventoryItem &&
+        (() => {
+          const matchingPR = findMatchingPR(
+            selectedInventoryItem,
+            actionablePRs,
+          );
+          const prData = matchingPR
+            ? parsePRData(matchingPR.title, matchingPR.body)
+            : null;
+          const isLockfileOnly =
+            !!selectedInventoryItem.targetVersion &&
+            selectedInventoryItem.currentVersion ===
+              selectedInventoryItem.targetVersion;
+
+          return (
+            <div className="fixed inset-0 z-50 flex justify-end">
+              <div
+                className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm transition-opacity"
+                onClick={() => setSelectedInventoryItem(null)}
+              ></div>
+
+              <div className="relative w-full max-w-2xl bg-white h-full shadow-2xl flex flex-col animate-slide-in-right">
+                <div className="bg-slate-800 px-8 py-6 flex justify-between items-center shrink-0">
+                  <div className="min-w-0">
+                    <h3 className="text-xl font-mono text-white font-semibold truncate pr-4">
+                      {selectedInventoryItem.packageName}
+                    </h3>
+                    <p className="text-sm text-slate-400 mt-1">
+                      {selectedInventoryItem.repo}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setSelectedInventoryItem(null)}
+                    className="text-slate-400 hover:text-white transition-colors shrink-0"
+                  >
+                    <svg
+                      className="w-6 h-6"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M6 18L18 6M6 6l12 12"
+                      />
+                    </svg>
+                  </button>
+                </div>
+
+                <div className="p-8 overflow-y-auto grow bg-slate-50 space-y-6">
+                  <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm">
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">
+                      Declared in Package Manifest
+                    </h4>
+                    <div className="flex items-center gap-2 text-sm font-mono">
+                      <span className="bg-slate-100 text-slate-700 px-2.5 py-1 rounded-md border border-slate-300">
+                        {selectedInventoryItem.currentVersion}
+                      </span>
+                      {selectedInventoryItem.targetVersion &&
+                        selectedInventoryItem.targetVersion !==
+                          selectedInventoryItem.currentVersion && (
+                          <>
+                            <span className="text-slate-400">→</span>
+                            <span className="bg-blue-50 text-blue-700 font-bold px-2.5 py-1 rounded-md border border-blue-200">
+                              {selectedInventoryItem.targetVersion}
+                            </span>
+                          </>
+                        )}
+                    </div>
+                    {isLockfileOnly && (
+                      <p className="text-xs text-slate-500 mt-3 leading-relaxed">
+                        🔒 The declared range already covers the latest matching
+                        release, so{" "}
+                        <code className="font-mono bg-slate-100 px-1 rounded">
+                          package.json
+                        </code>{" "}
+                        doesn&apos;t need to change — only the lockfile-resolved
+                        version updates (see below).
+                      </p>
+                    )}
+                  </div>
+
+                  {matchingPR ? (
+                    <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm">
+                      <div className="flex items-center justify-between mb-3">
+                        <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                          Pending Update
+                        </h4>
+                        <span
+                          className={`px-2.5 py-1 inline-flex text-[10px] font-bold uppercase tracking-wide rounded-full ${matchingPR.isDraft ? "bg-slate-200 text-slate-700" : "bg-blue-100 text-blue-700"}`}
+                        >
+                          {matchingPR.isDraft ? "Draft" : "Open"}
+                        </span>
+                      </div>
+                      {prData?.currentVersion && prData?.newVersion ? (
+                        <div className="flex items-center gap-2 text-sm font-mono mb-4">
+                          <span className="bg-slate-100 text-slate-700 px-2.5 py-1 rounded-md border border-slate-300">
+                            {prData.currentVersion}
+                          </span>
+                          <span className="text-slate-400">→</span>
+                          <span className="bg-emerald-50 text-emerald-700 font-bold px-2.5 py-1 rounded-md border border-emerald-200">
+                            {prData.newVersion}
+                          </span>
+                          <span className="text-xs text-slate-400 ml-1">
+                            (actual resolved version)
+                          </span>
+                        </div>
+                      ) : (
+                        <p className="text-sm text-slate-400 italic mb-4">
+                          See changelog details below.
+                        </p>
+                      )}
+                      <a
+                        href={matchingPR.htmlUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-2 text-sm text-indigo-600 hover:text-indigo-800 font-medium underline underline-offset-2"
+                      >
+                        View PR #{matchingPR.prNumber} on GitHub
+                      </a>
+
+                      <div className="mt-6 pt-6 border-t border-slate-200 max-w-none">
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={markdownComponents}
+                        >
+                          {cleanMarkdownBody(matchingPR.body)}
+                        </ReactMarkdown>
+                      </div>
+                    </div>
+                  ) : selectedInventoryItem.targetVersion ? (
+                    <div className="bg-white rounded-lg border border-slate-200 p-5 shadow-sm text-sm text-slate-500">
+                      No open Renovate PR found for this package yet — it may
+                      not have been created, or it was already merged or closed.
+                    </div>
+                  ) : (
+                    <div className="bg-emerald-50 rounded-lg border border-emerald-200 p-5 text-sm text-emerald-800">
+                      ✅ Up to date — no pending updates detected for this
+                      package.
+                    </div>
+                  )}
+                </div>
+
+                {matchingPR && (
+                  <div className="bg-white px-8 py-5 border-t border-slate-200 shrink-0 flex justify-end shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+                    <a
+                      href={matchingPR.htmlUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2.5 rounded-md font-semibold tracking-wide transition-colors shadow-sm flex items-center gap-2"
+                    >
+                      Review & Merge on GitHub
+                      <svg
+                        className="w-4 h-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
+                        />
+                      </svg>
+                    </a>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })()}
     </main>
   );
 }

@@ -14,6 +14,37 @@ interface GitHubIssue {
   body: string | null;
 }
 
+interface GitHubPullRequest {
+  number: number;
+  title: string;
+  body: string | null;
+  html_url: string;
+  draft: boolean;
+  user: { login: string } | null;
+  head: { ref: string };
+}
+
+// GitHub list endpoints cap out at 30 results per page unless paginated
+// explicitly, which was silently dropping PRs/issues once a repo passed
+// that count. Follow every page so nothing gets missed.
+async function fetchAllPages<T>(
+  url: string,
+  headers: Record<string, string>,
+): Promise<T[]> {
+  const results: T[] = [];
+  const separator = url.includes("?") ? "&" : "?";
+  let page = 1;
+
+  while (true) {
+    const res = await axios.get(`${url}${separator}per_page=100&page=${page}`, { headers });
+    results.push(...res.data);
+    if (res.data.length < 100) break;
+    page++;
+  }
+
+  return results;
+}
+
 // --- 1. Enterprise Authentication Flow ---
 async function getInstallationToken(): Promise<string | null> {
   const appId = process.env.GITHUB_APP_ID;
@@ -68,13 +99,13 @@ async function getPlatformData() {
       const headers = { Authorization: `Bearer ${token}`, Accept: "application/vnd.github.v3+json" };
 
       // Make parallel requests to speed up page load
-      const [issuesRes, pullsRes] = await Promise.all([
-        axios.get(`https://api.github.com/repos/${repo.owner}/${repo.name}/issues?state=open&creator=app/renovate`, { headers }).catch(() => ({ data: [] })),
-        axios.get(`https://api.github.com/repos/${repo.owner}/${repo.name}/pulls?state=open`, { headers }).catch(() => ({ data: [] }))
+      const [issues, pulls] = await Promise.all([
+        fetchAllPages<GitHubIssue>(`https://api.github.com/repos/${repo.owner}/${repo.name}/issues?state=open&creator=app/renovate`, headers).catch(() => []),
+        fetchAllPages<GitHubPullRequest>(`https://api.github.com/repos/${repo.owner}/${repo.name}/pulls?state=open`, headers).catch(() => [])
       ]);
 
       // --- Process PRs (Actionable Updates) ---
-      for (const pr of pullsRes.data) {
+      for (const pr of pulls) {
         const isRenovate = pr.user?.login?.includes("renovate") || pr.head.ref.startsWith("renovate/");
         if (isRenovate) {
           prs.push({
@@ -90,12 +121,16 @@ async function getPlatformData() {
       }
 
       // --- Process Dashboard Issue (All Packages Inventory) ---
-      const dashboardIssue = issuesRes.data.find((issue: GitHubIssue) => issue.title.includes("Dependency Dashboard"));
+      const dashboardIssue = issues.find((issue) => issue.title.includes("Dependency Dashboard"));
       if (dashboardIssue && dashboardIssue.body) {
         const lines = dashboardIssue.body.split('\n');
         
         // Ensure we only parse the Detected Dependencies section to avoid parsing the Open PR checkboxes
         let isParsingDependencies = false;
+        // Renovate lists the same package once per file/manager it's found in
+        // (e.g. a GitHub Action used in two workflows). Track ones already
+        // seen for this repo so exact duplicates only appear once.
+        const seenDependencies = new Set<string>();
 
         for (const line of lines) {
           if (line.includes("## Detected Dependencies")) isParsingDependencies = true;
@@ -117,13 +152,21 @@ async function getPlatformData() {
           
           // Ignore table of contents or empty brackets
           if (match && match[1] && !match[1].includes("]")) {
-            inventory.push({
-              id: `${repo.name}-inv-${match[1]}`,
-              repo: repo.name,
-              packageName: match[1].trim(),
-              currentVersion: match[2].trim(),
-              targetVersion: match[3] ? match[3].trim() : null,
-            });
+            const packageName = match[1].trim();
+            const currentVersion = match[2].trim();
+            const targetVersion = match[3] ? match[3].trim() : null;
+            const dedupeKey = `${packageName}|${currentVersion}|${targetVersion}`;
+
+            if (!seenDependencies.has(dedupeKey)) {
+              seenDependencies.add(dedupeKey);
+              inventory.push({
+                id: `${repo.name}-inv-${dedupeKey}`,
+                repo: repo.name,
+                packageName,
+                currentVersion,
+                targetVersion,
+              });
+            }
           }
         }
       }

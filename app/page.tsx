@@ -4,6 +4,16 @@ import DashboardUI, { InventoryItem, PullRequestUpdate } from "./DashboardUI";
 
 export const dynamic = "force-dynamic";
 
+interface GitHubRepository {
+  owner: { login: string };
+  name: string;
+}
+
+interface GitHubIssue {
+  title: string;
+  body: string | null;
+}
+
 // --- 1. Enterprise Authentication Flow ---
 async function getInstallationToken(): Promise<string | null> {
   const appId = process.env.GITHUB_APP_ID;
@@ -37,7 +47,7 @@ async function fetchInstalledRepositories(token: string) {
     const res = await axios.get("https://api.github.com/installation/repositories?per_page=100", {
       headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github.v3+json" },
     });
-    return res.data.repositories.map((repo: any) => ({ owner: repo.owner.login, name: repo.name }));
+    return res.data.repositories.map((repo: GitHubRepository) => ({ owner: repo.owner.login, name: repo.name }));
   } catch (error) {
     console.error("Failed to fetch installed repositories:", error);
     return [];
@@ -80,7 +90,7 @@ async function getPlatformData() {
       }
 
       // --- Process Dashboard Issue (All Packages Inventory) ---
-      const dashboardIssue = issuesRes.data.find((issue: any) => issue.title.includes("Dependency Dashboard"));
+      const dashboardIssue = issuesRes.data.find((issue: GitHubIssue) => issue.title.includes("Dependency Dashboard"));
       if (dashboardIssue && dashboardIssue.body) {
         const lines = dashboardIssue.body.split('\n');
         

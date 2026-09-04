@@ -1,8 +1,14 @@
 "use client";
 
-import { useState, type ComponentPropsWithoutRef } from "react";
+import {
+  useState,
+  useTransition,
+  type ComponentPropsWithoutRef,
+} from "react";
 import ReactMarkdown, { type ExtraProps } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import PwaInstall from "./PwaInstall";
+import { refreshActionableUpdates, refreshInventory } from "./actions";
 
 export interface InventoryItem {
   id: string;
@@ -267,12 +273,16 @@ function RepoJumpNav({ repoNames }: { repoNames: string[] }) {
 }
 
 export default function DashboardUI({
-  inventory,
-  actionablePRs,
+  inventory: initialInventory,
+  actionablePRs: initialActionablePRs,
 }: {
   inventory: InventoryItem[];
   actionablePRs: PullRequestUpdate[];
 }) {
+  const [inventory, setInventory] = useState(initialInventory);
+  const [actionablePRs, setActionablePRs] = useState(initialActionablePRs);
+  const [isRefreshingUpdates, startUpdatesRefresh] = useTransition();
+  const [isRefreshingInventory, startInventoryRefresh] = useTransition();
   const [activeTab, setActiveTab] = useState<"updates" | "inventory">(
     "updates",
   );
@@ -280,6 +290,18 @@ export default function DashboardUI({
     useState<PullRequestUpdate | null>(null);
   const [selectedInventoryItem, setSelectedInventoryItem] =
     useState<InventoryItem | null>(null);
+
+  const handleRefreshUpdates = () => {
+    startUpdatesRefresh(async () => {
+      setActionablePRs(await refreshActionableUpdates());
+    });
+  };
+
+  const handleRefreshInventory = () => {
+    startInventoryRefresh(async () => {
+      setInventory(await refreshInventory());
+    });
+  };
 
   // Sort and Group Inventory Data
   const sortedInventory = [...inventory].sort((a, b) =>
@@ -312,23 +334,25 @@ export default function DashboardUI({
         <header className="mb-10 flex flex-col md:flex-row md:items-end justify-between gap-6">
           <div>
             <h1 className="text-2xl font-bold text-slate-900">
-              Dependency Package Monitoring Dashboard
+              Dependency Dashboard
             </h1>
             <p className="text-slate-500 mt-1">
               Manage Project Dependencies & Track Actionable Updates
             </p>
           </div>
+          <PwaInstall />
 
-          <div className="flex bg-slate-200 p-1 rounded-lg shadow-inner self-start md:self-auto">
+          <div className="flex bg-slate-200 p-1 rounded-lg shadow-inner w-full sm:w-auto self-stretch sm:self-auto md:self-auto">
             <button
               onClick={() => setActiveTab("updates")}
-              className={`px-6 py-2.5 rounded-md text-sm font-semibold transition-all ${
+              className={`flex-1 sm:flex-initial px-4 sm:px-6 py-2.5 rounded-md text-sm font-semibold transition-all whitespace-nowrap ${
                 activeTab === "updates"
                   ? "bg-white text-indigo-700 shadow-sm"
                   : "text-slate-500 hover:text-slate-700"
               }`}
             >
-              Actionable Updates
+              <span className="sm:hidden">Updates</span>
+              <span className="hidden sm:inline">Actionable Updates</span>
               {actionablePRs.length > 0 && (
                 <span className="ml-2 bg-indigo-100 text-indigo-700 py-0.5 px-2 rounded-full text-xs">
                   {actionablePRs.length}
@@ -337,13 +361,14 @@ export default function DashboardUI({
             </button>
             <button
               onClick={() => setActiveTab("inventory")}
-              className={`px-6 py-2.5 rounded-md text-sm font-semibold transition-all ${
+              className={`flex-1 sm:flex-initial px-4 sm:px-6 py-2.5 rounded-md text-sm font-semibold transition-all whitespace-nowrap ${
                 activeTab === "inventory"
                   ? "bg-white text-slate-900 shadow-sm"
                   : "text-slate-500 hover:text-slate-700"
               }`}
             >
-              All Packages
+              <span className="sm:hidden">Packages</span>
+              <span className="hidden sm:inline">All Packages</span>
             </button>
           </div>
         </header>
@@ -367,14 +392,13 @@ export default function DashboardUI({
             <p key="updates-desc">
               <strong>Source:</strong>{" "}
               <span>
-                Open pull requests created by Renovate for each repository.
-                Each row shows the real, lockfile-resolved version change
-                (e.g.{" "}
+                Open pull requests created by Renovate for each repository. Each
+                row shows the real, lockfile-resolved version change (e.g.{" "}
                 <code className="font-mono bg-white/60 px-1 rounded">
                   1.11.21 → 1.11.23
                 </code>
-                ) taken directly from the PR — this is the version that
-                actually gets installed once merged.
+                ) taken directly from the PR — this is the version that actually
+                gets installed once merged.
               </span>
             </p>
           ) : (
@@ -396,6 +420,41 @@ export default function DashboardUI({
               </span>
             </p>
           )}
+          <button
+            onClick={
+              activeTab === "updates"
+                ? handleRefreshUpdates
+                : handleRefreshInventory
+            }
+            disabled={
+              activeTab === "updates"
+                ? isRefreshingUpdates
+                : isRefreshingInventory
+            }
+            className="ml-auto shrink-0 flex items-center gap-1.5 text-xs font-semibold text-blue-700 hover:text-blue-900 bg-white hover:bg-blue-100 border border-blue-200 px-2.5 py-1.5 rounded-md transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            <svg
+              className={`w-3.5 h-3.5 ${
+                (
+                  activeTab === "updates"
+                    ? isRefreshingUpdates
+                    : isRefreshingInventory
+                )
+                  ? "animate-spin"
+                  : ""
+              }`}
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              viewBox="0 0 24 24"
+            >
+              <path d="M4 4v5h5M20 20v-5h-5" />
+              <path d="M4.5 9A7.5 7.5 0 0119 7.5M19.5 15A7.5 7.5 0 015 16.5" />
+            </svg>
+            Refresh
+          </button>
         </div>
 
         {/* --- VIEW 1: ACTIONABLE UPDATES (PRs) --- */}
@@ -415,19 +474,22 @@ export default function DashboardUI({
                     id={repoElementId(repoName)}
                     className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden scroll-mt-6"
                   >
-                    <div className="bg-slate-800 px-6 py-4 border-b border-slate-200 flex justify-between items-center">
-                      <h2 className="text-lg font-semibold text-white tracking-wide">
+                    <div className="bg-slate-800 px-6 py-4 border-b border-slate-200 flex justify-between items-center gap-3">
+                      <h2 className="text-lg font-semibold text-white tracking-wide truncate min-w-0">
                         📦 {repoName}
                       </h2>
                       <a
                         href={`https://github.com/PT-Helios-Informatika-Nusantara/${repoName}/issues?q=is%3Aissue+is%3Aopen+Dependency+Dashboard`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-xs font-mono font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 border border-slate-600 px-3 py-1.5 rounded-md transition-all flex items-center gap-2 shadow-sm"
+                        aria-label="Manage on GitHub"
+                        className="shrink-0 text-xs font-mono font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 border border-slate-600 px-3 py-1.5 rounded-md transition-all flex items-center gap-2 shadow-sm"
                       >
-                        <span>Manage on GitHub</span>
+                        <span className="hidden sm:inline">
+                          Manage on GitHub
+                        </span>
                         <svg
-                          className="w-3.5 h-3.5"
+                          className="w-3.5 h-3.5 shrink-0"
                           fill="none"
                           stroke="currentColor"
                           viewBox="0 0 24 24"
@@ -590,19 +652,22 @@ export default function DashboardUI({
                     id={repoElementId(repoName)}
                     className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden scroll-mt-6"
                   >
-                    <div className="bg-slate-800 px-6 py-4 border-b border-slate-200 flex justify-between items-center">
-                      <h2 className="text-lg font-semibold text-white tracking-wide">
+                    <div className="bg-slate-800 px-6 py-4 border-b border-slate-200 flex justify-between items-center gap-3">
+                      <h2 className="text-lg font-semibold text-white tracking-wide truncate min-w-0">
                         📦 {repoName}
                       </h2>
                       <a
                         href={`https://github.com/PT-Helios-Informatika-Nusantara/${repoName}/issues?q=is%3Aissue+is%3Aopen+Dependency+Dashboard`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="text-xs font-mono font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 border border-slate-600 px-3 py-1.5 rounded-md transition-all flex items-center gap-2 shadow-sm"
+                        aria-label="Manage on GitHub"
+                        className="shrink-0 text-xs font-mono font-medium text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 border border-slate-600 px-3 py-1.5 rounded-md transition-all flex items-center gap-2 shadow-sm"
                       >
-                        <span>Manage on GitHub</span>
+                        <span className="hidden sm:inline">
+                          Manage on GitHub
+                        </span>
                         <svg
-                          className="w-3.5 h-3.5"
+                          className="w-3.5 h-3.5 shrink-0"
                           fill="none"
                           stroke="currentColor"
                           viewBox="0 0 24 24"
